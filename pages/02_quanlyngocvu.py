@@ -1,8 +1,11 @@
+import os, sys
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
 import pandas as pd
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
+from utils.gs import read_df, write_df, options, add_lookup
 DATE_FMT_SAVE = "%d-%m-%Y"  # dd-mm-yyyy
 
 def parse_any_date(s):
@@ -131,12 +134,21 @@ with tab3:
             hh_xm = pd.DataFrame(columns=["Nhân viên","Doanh thu"])
     except:
         hh_xm = pd.DataFrame(columns=["Nhân viên","Doanh thu"])
-    df = pd.merge(tong_cong, hh_xm, on="Nhân viên", how="outer").fillna(0)
-    df["Lương cơ bản"] = df["Công"] * 250_000
+    df = pd.merge(tong_cong, hh_xm, on="Nhân viên", how="outer")
+
+    # Ép các cột số về numeric để tránh dtype=object
+    for col in ["Công", "Doanh thu", "Tạm ứng", "Khấu trừ"]:
+        df[col] = pd.to_numeric(df.get(col, 0), errors="coerce").fillna(0)
+
+    # Tính lương
+    df["Lương cơ bản"] = (df["Công"] * 250_000).round(0)
     df["Hoa hồng"] = (df["Doanh thu"] * 0.02).round(0)
-    df["Tạm ứng"] = 0
-    df["Khấu trừ"] = 0
-    df["Tổng lương"] = df["Lương cơ bản"] + df["Hoa hồng"] - df["Tạm ứng"] - df["Khấu trừ"]
+    df["Tổng lương"] = (df["Lương cơ bản"] + df["Hoa hồng"] - df["Tạm ứng"] - df["Khấu trừ"]).round(0)
+
+    # (tuỳ chọn) ép kiểu int cho đẹp
+    for col in ["Lương cơ bản", "Hoa hồng", "Tổng lương", "Công"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+
     df.insert(0, "Tháng", thang)
     st.dataframe(df, use_container_width=True)
     if st.button("Ghi vào LUONG (ghi đè toàn sheet)"):
