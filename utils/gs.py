@@ -1,3 +1,4 @@
+# utils/gs.py
 import streamlit as st
 import pandas as pd
 from gspread_dataframe import get_as_dataframe, set_with_dataframe
@@ -43,15 +44,16 @@ def add_lookup(kind: str, value: str):
         return
     df = read_df("LOOKUPS")
     if df.empty:
-        df = pd.DataFrame(columns=["Loại","Giá trị"])
-    if not ((df["Loại"]==kind) & (df["Giá trị"]==value)).any():
+        df = pd.DataFrame(columns=["Loại", "Giá trị"])
+    if not ((df["Loại"] == kind) & (df["Giá trị"] == value)).any():
         df = pd.concat([df, pd.DataFrame([{"Loại": kind, "Giá trị": value}])], ignore_index=True)
         write_df("LOOKUPS", df)
 
 def options(kind: str):
     df = read_df("LOOKUPS")
-    if df.empty: return []
-    vals = df.loc[df["Loại"]==kind, "Giá trị"].dropna().astype(str).unique().tolist()
+    if df.empty:
+        return []
+    vals = df.loc[df["Loại"] == kind, "Giá trị"].dropna().astype(str).unique().tolist()
     vals = [v for v in vals if v.strip()]
     return sorted(vals)
 
@@ -60,3 +62,23 @@ def items_from_inventory():
     if "Mặt hàng" in inv.columns:
         return sorted(inv["Mặt hàng"].dropna().astype(str).unique().tolist())
     return []
+
+def replace_rows_by_date(ws_name: str, date_col: str, date_str: str, new_rows: pd.DataFrame):
+    """Ghi đè các dòng có cùng ngày = date_str bằng tập new_rows (đã chuẩn cột)."""
+    old = read_df(ws_name)
+    if old.empty:
+        base = new_rows.copy()
+    else:
+        if date_col in old.columns:
+            mask_keep = old[date_col].astype(str).ne(str(date_str))
+            base = old[mask_keep].copy()
+        else:
+            base = old.copy()
+        base = pd.concat([base, new_rows], ignore_index=True)
+    # Đảm bảo thứ tự cột ổn định
+    cols = list(new_rows.columns)
+    for c in base.columns:
+        if c not in cols:
+            cols.append(c)
+    base = base[cols]
+    write_df(ws_name, base)

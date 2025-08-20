@@ -4,11 +4,10 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date
-from utils.gs import read_df, write_df, options, add_lookup
+from datetime import datetime, date, timedelta
+from utils.gs import read_df, write_df, options, add_lookup, replace_rows_by_date
 
-# ---- Date helpers ----
-DATE_FMT_SAVE = "%d-%m-%Y"  # dd-mm-yyyy
+DATE_FMT_SAVE = "%d-%m-%Y"
 
 def parse_any_date(s):
     if pd.isna(s):
@@ -29,207 +28,345 @@ def fmt_date(d):
         return pd.to_datetime(d).strftime(DATE_FMT_SAVE)
     return str(d)
 
-def ensure_numeric_cols(df, cols):
-    # Tạo cột nếu thiếu, rồi ép numeric (Series, không phải scalar)
-    for colname in cols:
-        if colname not in df.columns:
-            df[colname] = 0
-        df[colname] = pd.to_numeric(df[colname], errors="coerce").fillna(0.0)
-    return df
+def safe_options(kind):
+    try:
+        vals = options(kind) or []
+        vals = [v for v in vals if str(v).strip()]
+        return sorted(set(vals))
+    except Exception:
+        return []
 
 st.set_page_config(page_title="quanlyngocvu", layout="wide")
 st.title("Quản lý Ngọc Vũ")
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Thống kê doanh thu", "Đối chiếu tồn kho", "Lương & Hoa hồng", "Danh mục/Thiết lập"]
+tab1, tab2, tab3 = st.tabs(
+    ["Thống kê doanh thu", "Đối chiếu tồn kho", "Lương & Hoa hồng"]
 )
 
 # =======================
-# TAB 1: Thống kê doanh thu
+# TAB 1: Thống kê doanh thu (full filter)
 # =======================
 with tab1:
-    st.subheader("Báo cáo theo ngày/tuần (2-CN)/tháng")
-    gran = st.selectbox("Nhóm theo", ["Ngày","Tuần (2-CN)","Tháng"], key="rpt_gran")
-    data_src = st.multiselect("Nguồn", ["XE_MAY","OTO"], default=["XE_MAY","OTO"], key="rpt_src")
+    st.subheader("Báo cáo theo ngày với bộ lọc đầy đủ")
 
-    dfs = []
-    for src in data_src:
+    c1, c2, c3 = st.columns([1,1,1])
+    with c1:
+        src = st.multiselect("Nguồn", ["XE_MAY","OTO"], default=["XE_MAY","OTO"], key="ql_stat_src")
+    with c2:
+        dfrom = st.date_input("Từ ngày", pd.Timestamp.today().replace(day=1), key="ql_stat_from")
+    with c3:
+        dto = st.date_input("Đến ngày", pd.Timestamp.today(), key="ql_stat_to")
+
+    frames = []
+    for s in src:
         try:
-            dfi = read_df(src)
-            if dfi.empty:
-                continue
-            dfi["Nguồn"] = src
-            dfs.append(dfi)
+            d = read_df(s)
+            if not d.empty:
+                d["Nguồn"] = s
+                frames.append(d)
         except Exception:
             pass
 
-    if dfs:
-        df = pd.concat(dfs, ignore_index=True)
+    if not frames:
+        st.info("Chưa có dữ liệu.")
+    else:
+        df = pd.concat(frames, ignore_index=True)
         df["Ngày"] = df["Ngày"].apply(parse_any_date)
         df = df.dropna(subset=["Ngày"])
+        df = df[(df["Ngày"] >= pd.to_datetime(dfrom)) & (df["Ngày"] <= pd.to_datetime(dto))]
 
-        def to_float(x):
-            try:
-                return float(str(x).replace(",", ""))
-            except Exception:
-                return 0.0
+        df["Khách"] = df.get("Khách hàng/Địa chỉ", df.get("Khách hàng", ""))
+        df["Loại sản phẩm"] = df.get("Loại sản phẩm", "")
+        df["PP Thanh toán"] = df.get("PP Thanh toán", "")
 
-        def revenue_row(r):
-            if r["Nguồn"] == "OTO":
-                sl = to_float(r.get("Số lượng", 0))
-                dg = to_float(r.get("Đơn giá", 0))
-                tt = to_float(r.get("Thanh Toán", 0))
-                return sl * dg if (sl * dg) > 0 else tt
-            else:
-                return to_float(r.get("Thanh Toán", 0))
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            kh = st.multiselect("Khách hàng", sorted(df["Khách"].dropna().astype(str).unique().tolist()), key="ql_stat_kh")
+        with f2:
+            lsp = st.multiselect("Loại sản phẩm", sorted(df["Loại sản phẩm"].dropna().astype(str).unique().tolist()), key="ql_stat_lsp")
+        with f3:
+            pp = st.multiselect("PP Thanh toán", sorted(df["PP Thanh toán"].dropna().astype(str).unique().tolist()), key="ql_stat_pp")
 
-        df["Doanh thu"] = df.apply(revenue_row, axis=1)
+        if kh: df = df[df["Khách"].astype(str).isin(kh)]
+        if lsp: df = df[df["Loại sản phẩm"].astype(str).isin(lsp)]
+        if pp: df = df[df["PP Thanh toán"].astype(str).isin(pp)]
 
-        if gran == "Ngày":
-            grp = df.groupby(df["Ngày"].dt.date)["Doanh thu"].sum().reset_index(name="Doanh thu")
-        elif gran == "Tháng":
-            grp = df.groupby([df["Ngày"].dt.to_period("M").dt.to_timestamp()])["Doanh thu"].sum().reset_index(name="Doanh thu")
-        else:
-            df["Thứ"] = df["Ngày"].dt.dayofweek
-            df["Ngày_thu2"] = df["Ngày"] - pd.to_timedelta(df["Thứ"], unit="D")
-            grp = df.groupby(df["Ngày_thu2"].dt.date)["Doanh thu"].sum().reset_index(name="Doanh thu")
+        # KPI
+        df["SL_Giao"] = 0.0
+        df["Vo_ve"] = 0.0
 
-        grp.rename(columns={grp.columns[0]: "Mốc"}, inplace=True)
+        mask_xm = df["Nguồn"] == "XE_MAY"
+        df.loc[mask_xm, "SL_Giao"] = pd.to_numeric(df.loc[mask_xm, "Số lượng giao"], errors="coerce").fillna(0)
+        df.loc[mask_xm, "Vo_di"] = df.loc[mask_xm, "SL_Giao"]
+        df.loc[mask_xm, "Vo_ve"] = pd.to_numeric(df.loc[mask_xm, "Vỏ về"], errors="coerce").fillna(0)
+
+        mask_oto = df["Nguồn"] == "OTO"
+        df.loc[mask_oto, "SL_Giao"] = pd.to_numeric(df.loc[mask_oto, "Số lượng"], errors="coerce").fillna(0)
+        df.loc[mask_oto, ["Vo_di","Vo_ve"]] = 0
+
+        grp = df.groupby(df["Ngày"].dt.date).agg(
+            SL_Giao=("SL_Giao","sum"),
+            Vo_di=("Vo_di","sum"),
+            Vo_ve=("Vo_ve","sum"),
+        ).reset_index().rename(columns={"Ngày":"Mốc"})
         grp["Mốc"] = pd.to_datetime(grp["Mốc"]).dt.strftime(DATE_FMT_SAVE)
-
         st.dataframe(grp, use_container_width=True)
-        st.bar_chart(grp.set_index("Mốc")["Doanh thu"])
-    else:
-        st.info("Chưa có dữ liệu doanh thu.")
+        st.bar_chart(grp.set_index("Mốc")["SL_Giao"])
 
 # =======================
-# TAB 2: Đối chiếu tồn kho
+# TAB 2: Đối chiếu tồn kho theo ngày
 # =======================
 with tab2:
-    st.subheader("So sánh tồn kho & giao hàng (kể cả vỏ bình)")
-    try:
-        inv = read_df("INVENTORY")
-    except Exception:
-        inv = pd.DataFrame(columns=["Mặt hàng","Tồn đầu","Nhập","Xuất","Tồn cuối","Ghi chú"])
+    st.subheader("Đối chiếu tồn kho theo ngày")
+    ngay_dc = st.date_input("Ngày đối chiếu (dd-mm-yyyy)", pd.Timestamp.today(), key="dc_ngay")
+    ngay_truoc = pd.to_datetime(ngay_dc) - timedelta(days=1)
 
-    def sum_qty(ws, qty_col):
-        try:
-            dfq = read_df(ws)
-            if dfq.empty:
-                return pd.Series(dtype=float)
-            dfq["Ngày"] = dfq["Ngày"].apply(parse_any_date)
-            dfq = dfq.dropna(subset=["Ngày"])
-            key = "Loại sản phẩm" if "Loại sản phẩm" in dfq.columns else None
-            if key is None:
-                return pd.Series(dtype=float)
-            return pd.to_numeric(dfq.get(qty_col, 0), errors="coerce").groupby(dfq[key]).sum()
-        except Exception:
-            return pd.Series(dtype=float)
+    # Lấy danh sách sản phẩm từ LOOKUPS
+    items = safe_options("Mặt hàng")
 
-    x1 = sum_qty("XE_MAY", "Số lượng giao")
-    x2 = sum_qty("OTO", "Số lượng")
-    out = (x1.add(x2, fill_value=0)).reset_index()
-    if not out.empty:
-        out.columns = ["Mặt hàng", "Xuất_tính_từ_đơn"]
-
-    if not inv.empty and not out.empty:
-        inv_agg = inv.merge(out, on="Mặt hàng", how="left")
-        inv_agg["Xuất"] = pd.to_numeric(inv_agg.get("Xuất", 0), errors="coerce").fillna(0)
-        inv_agg["Xuất_tính_từ_đơn"] = pd.to_numeric(inv_agg.get("Xuất_tính_từ_đơn", 0), errors="coerce").fillna(0)
-        inv_agg["Chênh lệch (Xuất_tính - Xuất)"] = inv_agg["Xuất_tính_từ_đơn"] - inv_agg["Xuất"]
-        st.dataframe(inv_agg, use_container_width=True)
+    # DAILY_CLOSE (tồn cuối)
+    close = read_df("DAILY_CLOSE")
+    if not close.empty:
+        close["Ngày"] = close["Ngày"].apply(parse_any_date)
     else:
-        st.info("Thiếu INVENTORY hoặc dữ liệu đơn hàng để đối chiếu.")
+        close = pd.DataFrame(columns=["Ngày","Mặt hàng","Tồn cuối"])
 
-    st.caption("Theo dõi vỏ bình: so 'Vỏ về' (XE_MAY) với tab BOTTLE_RETURN để phát hiện thất thoát.")
+    ton_prev = close[close["Ngày"].dt.date == ngay_truoc.date()].groupby("Mặt hàng")["Tồn cuối"].sum()
+    ton_curr = close[close["Ngày"].dt.date == pd.to_datetime(ngay_dc).date()].groupby("Mặt hàng")["Tồn cuối"].sum()
+
+    # NHẬP_HÀNG trong ngày
+    nhap = read_df("NHAP_HANG")
+    if not nhap.empty:
+        nhap["Ngày"] = nhap["Ngày"].apply(parse_any_date)
+        k = nhap[nhap["Ngày"].dt.date == pd.to_datetime(ngay_dc).date()].groupby("Mặt hàng")["Số lượng nhập"].sum()
+    else:
+        k = pd.Series(dtype=float)
+
+    # Xuất thực tế (tính từ đơn hàng) trong ngày
+    # XE_MAY: Số lượng giao theo Loại sản phẩm
+    xm = read_df("XE_MAY")
+    if not xm.empty:
+        xm["Ngày"] = xm["Ngày"].apply(parse_any_date)
+        xm_day = xm[xm["Ngày"].dt.date == pd.to_datetime(ngay_dc).date()]
+        x1 = pd.to_numeric(xm_day.get("Số lượng giao", 0), errors="coerce")
+        z1 = x1.groupby(xm_day.get("Loại sản phẩm", "")).sum()
+    else:
+        z1 = pd.Series(dtype=float)
+
+    # OTO: Số lượng theo Loại sản phẩm
+    ot = read_df("OTO")
+    if not ot.empty:
+        ot["Ngày"] = ot["Ngày"].apply(parse_any_date)
+        ot_day = ot[ot["Ngày"].dt.date == pd.to_datetime(ngay_dc).date()]
+        x2 = pd.to_numeric(ot_day.get("Số lượng", 0), errors="coerce")
+        z2 = x2.groupby(ot_day.get("Loại sản phẩm", "")).sum()
+    else:
+        z2 = pd.Series(dtype=float)
+
+    z_act = z1.add(z2, fill_value=0)
+
+    # Tổng hợp theo danh mục sản phẩm
+    all_items = sorted(set(items) | set(ton_prev.index) | set(ton_curr.index) | set(k.index) | set(z_act.index))
+    rows = []
+    for it in all_items:
+        X = float(ton_prev.get(it, 0) or 0)
+        K = float(k.get(it, 0) or 0)
+        Y = float(ton_curr.get(it, 0) or 0)
+        Zexp = X + K - Y
+        Zact = float(z_act.get(it, 0) or 0)
+        rows.append({
+            "Mặt hàng": it,
+            "Tồn hôm qua (X)": int(X),
+            "Nhập hôm nay (K)": int(K),
+            "Tồn hôm nay (Y)": int(Y),
+            "Xuất kỳ vọng (Zexp=X+K-Y)": int(Zexp),
+            "Xuất thực tế (Zact)": int(Zact),
+            "Chênh lệch (Zexp-Zact)": int(Zexp - Zact),
+        })
+    out = pd.DataFrame(rows)
+    st.dataframe(out, use_container_width=True)
 
 # =======================
-# TAB 3: Lương & Hoa hồng
+# TAB 3: Lương & Hoa hồng (thiết lập + bảng tính)
 # =======================
 with tab3:
-    st.subheader("Tính lương theo công & hoa hồng theo doanh thu giao")
-    thang = st.text_input("Tháng (mm/YYYY)", value=pd.Timestamp.today().strftime("%m/%Y"), key="pay_month")
+    st.subheader("Thiết lập & tính lương theo tháng")
+    thang = st.text_input("Tháng (mm/YYYY)", value=pd.Timestamp.today().strftime("%m/%Y"), key="pay_month2")
 
-    # Điểm danh (CONG)
-    try:
-        cong = read_df("CONG")
-        if cong.empty:
-            cong = pd.DataFrame(columns=["Ngày","Nhân viên","Ca","Công","Ghi chú"])
-        else:
-            cong["Ngày"] = cong["Ngày"].apply(parse_any_date)
-            cong = cong[cong["Ngày"].dt.strftime("%m/%Y") == thang]
-    except Exception:
-        cong = pd.DataFrame(columns=["Ngày","Nhân viên","Ca","Công","Ghi chú"])
+    colA, colB = st.columns(2)
+    # --- PAY_RULES: lương cơ bản / đơn giá công / phụ cấp ---
+    with colA:
+        st.markdown("**Thiết lập lương cơ bản** (`PAY_RULES`)")
+        pay = read_df("PAY_RULES")
+        pay = pay if not pay.empty else pd.DataFrame(columns=["Tháng","Nhân viên","Luong_co_ban","Don_gia_cong","Phu_cap","Tam_ung","Khau_tru"])
+        pay_cur = pay[pay.get("Tháng","") == thang].copy()
+        if pay_cur.empty:
+            # khởi tạo theo danh sách nhân viên (LOOKUPS)
+            nv = safe_options("Nhân viên") or safe_options("Người chở")
+            pay_cur = pd.DataFrame({"Tháng": [thang]*len(nv), "Nhân viên": nv,
+                                    "Luong_co_ban": 0, "Don_gia_cong": 250000, "Phu_cap": 0, "Tam_ung": 0, "Khau_tru": 0})
+        pay_edit = st.data_editor(
+            pay_cur,
+            key="pay_rules_edit",
+            use_container_width=True,
+            column_config={
+                "Tháng": st.column_config.TextColumn(disabled=True),
+                "Nhân viên": st.column_config.TextColumn(),
+                "Luong_co_ban": st.column_config.NumberColumn(min_value=0, step=1000),
+                "Don_gia_cong": st.column_config.NumberColumn(min_value=0, step=1000),
+                "Phu_cap": st.column_config.NumberColumn(min_value=0, step=1000),
+                "Tam_ung": st.column_config.NumberColumn(min_value=0, step=1000),
+                "Khau_tru": st.column_config.NumberColumn(min_value=0, step=1000),
+            }
+        )
+        if st.button("Lưu PAY_RULES (ghi đè tháng)", key="save_pay_rules"):
+            # ghi đè theo tháng
+            base = pay[pay.get("Tháng","") != thang].copy()
+            base = pd.concat([base, pay_edit], ignore_index=True)
+            write_df("PAY_RULES", base)
+            st.success("Đã lưu PAY_RULES cho tháng " + thang)
 
-    # Tổng công theo nhân viên
-    if not cong.empty and "Công" in cong.columns:
-        cong["Công"] = pd.to_numeric(cong["Công"], errors="coerce").fillna(0.0)
-        tong_cong = cong.groupby("Nhân viên")["Công"].sum().reset_index(name="Công")
+    # --- COMMISSION_RULES: hoa hồng theo sản phẩm ---
+    with colB:
+        st.markdown("**Thiết lập hoa hồng theo sản phẩm** (`COMMISSION_RULES`)")
+        com = read_df("COMMISSION_RULES")
+        com = com if not com.empty else pd.DataFrame(columns=["Tháng","Mặt hàng","Ty_le_%","Hoa_hong_moi_donvi"])
+        items = safe_options("Mặt hàng")
+        com_cur = com[com.get("Tháng","") == thang].copy()
+        if com_cur.empty:
+            com_cur = pd.DataFrame({"Tháng":[thang]*len(items), "Mặt hàng": items, "Ty_le_%": 0.0, "Hoa_hong_moi_donvi": 0})
+        com_edit = st.data_editor(
+            com_cur,
+            key="com_rules_edit",
+            use_container_width=True,
+            column_config={
+                "Tháng": st.column_config.TextColumn(disabled=True),
+                "Mặt hàng": st.column_config.TextColumn(),
+                "Ty_le_%": st.column_config.NumberColumn(min_value=0.0, step=0.5),
+                "Hoa_hong_moi_donvi": st.column_config.NumberColumn(min_value=0, step=100),
+            }
+        )
+        if st.button("Lưu COMMISSION_RULES (ghi đè tháng)", key="save_com_rules"):
+            base = com[com.get("Tháng","") != thang].copy()
+            base = pd.concat([base, com_edit], ignore_index=True)
+            write_df("COMMISSION_RULES", base)
+            st.success("Đã lưu COMMISSION_RULES cho tháng " + thang)
+
+    st.markdown("---")
+    st.markdown("### Bảng tính lương tháng")
+
+    # Công theo tháng
+    cong = read_df("CONG")
+    if not cong.empty:
+        cong["Ngày"] = cong["Ngày"].apply(parse_any_date)
+        cong_m = cong[cong["Ngày"].dt.strftime("%m/%Y") == thang].copy()
+        cong_sum = cong_m.groupby("Nhân viên")["Công"].sum().reset_index(name="Công")
     else:
-        tong_cong = pd.DataFrame(columns=["Nhân viên","Công"])
+        cong_sum = pd.DataFrame(columns=["Nhân viên","Công"])
 
-    # Doanh thu theo người chở (XE_MAY)
-    try:
-        xm = read_df("XE_MAY")
-        if xm.empty:
-            hh_xm = pd.DataFrame(columns=["Nhân viên","Doanh thu"])
-        else:
-            xm["Ngày"] = xm["Ngày"].apply(parse_any_date)
-            xm = xm[xm["Ngày"].dt.strftime("%m/%Y") == thang]
-            xm["TT"] = pd.to_numeric(xm.get("Thanh Toán", 0), errors="coerce").fillna(0)
-            hh_xm = xm.groupby("Người chở")["TT"].sum().reset_index()
-            hh_xm.columns = ["Nhân viên","Doanh thu"]
-    except Exception:
-        hh_xm = pd.DataFrame(columns=["Nhân viên","Doanh thu"])
+    # Doanh thu + Số lượng theo nhân viên & mặt hàng (XE_MAY)
+    xm = read_df("XE_MAY")
+    if not xm.empty:
+        xm["Ngày"] = xm["Ngày"].apply(parse_any_date)
+        xm_m = xm[xm["Ngày"].dt.strftime("%m/%Y") == thang].copy()
+        xm_m["SL"] = pd.to_numeric(xm_m.get("Số lượng giao", 0), errors="coerce").fillna(0)
+        xm_m["TT"] = pd.to_numeric(xm_m.get("Thanh Toán", 0), errors="coerce").fillna(0)
+        # gộp theo NV & SP để tính hoa hồng theo sản phẩm (nếu có)
+        by_nv_sp = xm_m.groupby(["Người chở","Loại sản phẩm"]).agg(SL=("SL","sum"), DT=("TT","sum")).reset_index()
+        by_nv_rev = xm_m.groupby(["Người chở"]).agg(DoanhThu=("TT","sum")).reset_index()
+        by_nv_rev.rename(columns={"Người chở":"Nhân viên"}, inplace=True)
+    else:
+        by_nv_sp = pd.DataFrame(columns=["Người chở","Loại sản phẩm","SL","DT"])
+        by_nv_rev = pd.DataFrame(columns=["Nhân viên","DoanhThu"])
 
-    # Hợp nhất
-    df = pd.merge(tong_cong, hh_xm, on="Nhân viên", how="outer")
+    # Gộp nhân viên tổng thể
+    df = pd.merge(cong_sum, by_nv_rev, on="Nhân viên", how="outer").fillna(0)
 
-    # Đảm bảo cột số tồn tại rồi ép numeric (tránh AttributeError)
-    df = ensure_numeric_cols(df, ["Công", "Doanh thu", "Tạm ứng", "Khấu trừ"])
+    # Rút rules
+    pay = read_df("PAY_RULES")
+    pay_m = pay[pay.get("Tháng","") == thang].copy() if not pay.empty else pd.DataFrame()
+    com = read_df("COMMISSION_RULES")
+    com_m = com[com.get("Tháng","") == thang].copy() if not com.empty else pd.DataFrame()
 
-    # Tính lương
-    df["Lương cơ bản"] = (df["Công"].astype(float) * 250_000).round(0)
-    df["Hoa hồng"] = (df["Doanh thu"].astype(float) * 0.02).round(0)
-    df["Tổng lương"] = (df["Lương cơ bản"] + df["Hoa hồng"] - df["Tạm ứng"] - df["Khấu trừ"]).round(0)
+    # Map base salary
+    if not pay_m.empty:
+        df = pd.merge(df, pay_m[["Nhân viên","Luong_co_ban","Don_gia_cong","Phu_cap","Tam_ung","Khau_tru"]], on="Nhân viên", how="left")
+    else:
+        df["Luong_co_ban"] = 0
+        df["Don_gia_cong"] = 250000
+        df["Phu_cap"] = 0
+        df["Tam_ung"] = 0
+        df["Khau_tru"] = 0
 
-    # Hiển thị đẹp: int cho các cột tiền
-    for mcol in ["Lương cơ bản", "Hoa hồng", "Tổng lương", "Tạm ứng", "Khấu trừ"]:
-        df[mcol] = pd.to_numeric(df[mcol], errors="coerce").fillna(0).astype(int)
+    # Tính lương cơ bản: ưu tiên Luong_co_ban > 0; nếu 0 thì Công * Don_gia_cong
+    df["Luong_co_ban"] = pd.to_numeric(df["Luong_co_ban"], errors="coerce").fillna(0)
+    df["Don_gia_cong"] = pd.to_numeric(df["Don_gia_cong"], errors="coerce").fillna(250000)
+    df["Phu_cap"] = pd.to_numeric(df["Phu_cap"], errors="coerce").fillna(0)
+    df["Tam_ung"] = pd.to_numeric(df["Tam_ung"], errors="coerce").fillna(0)
+    df["Khau_tru"] = pd.to_numeric(df["Khau_tru"], errors="coerce").fillna(0)
+    df["Công"] = pd.to_numeric(df["Công"], errors="coerce").fillna(0.0)
 
+    base_from_day = (df["Công"] * df["Don_gia_cong"]).round(0)
+    df["Luong_co_ban_tinh"] = df["Luong_co_ban"].where(df["Luong_co_ban"] > 0, base_from_day)
+
+    # Tính hoa hồng:
+    # - Nếu có COMMISSION_RULES theo sản phẩm:
+    #     + Nếu "Hoa_hong_moi_donvi" > 0 => SL * đơn vị
+    #     + Else nếu "Ty_le_%" > 0 => áp % trên DoanhThu NV (fallback)
+    # - Nếu không có rule => fallback 2% DoanhThu
+    hoa_hong_nv = {}
+    if not by_nv_sp.empty and not com_m.empty:
+        # build map sp -> (rate%, per_unit)
+        com_m["Ty_le_%"] = pd.to_numeric(com_m["Ty_le_%"], errors="coerce").fillna(0.0)
+        com_m["Hoa_hong_moi_donvi"] = pd.to_numeric(com_m["Hoa_hong_moi_donvi"], errors="coerce").fillna(0)
+        rate_map = {r["Mặt hàng"]: (float(r["Ty_le_%"]), int(r["Hoa_hong_moi_donvi"])) for _, r in com_m.iterrows()}
+
+        for nv in by_nv_sp["Người chở"].unique():
+            sub = by_nv_sp[by_nv_sp["Người chở"] == nv]
+            total = 0.0
+            for _, r in sub.iterrows():
+                sp = r["Loại sản phẩm"]
+                SL = float(r["SL"] or 0)
+                DT = float(r["DT"] or 0)
+                rate, per_unit = rate_map.get(sp, (0.0, 0))
+                if per_unit and per_unit > 0:
+                    total += SL * per_unit
+                elif rate and rate > 0:
+                    total += DT * rate / 100.0
+            if total == 0:
+                # fallback 2% doanh thu NV nếu không khớp rule
+                dt_nv = float(by_nv_rev.loc[by_nv_rev["Nhân viên"] == nv, "DoanhThu"].sum() or 0)
+                total = dt_nv * 0.02
+            hoa_hong_nv[nv] = round(total, 0)
+    else:
+        # Fallback 2% doanh thu
+        for _, r in by_nv_rev.iterrows():
+            hoa_hong_nv[r["Nhân viên"]] = round(float(r["DoanhThu"] or 0) * 0.02, 0)
+
+    df["Hoa_hồng"] = df["Nhân viên"].map(hoa_hong_nv).fillna(0)
+
+    df["Tổng lương"] = (df["Luong_co_ban_tinh"] + df["Phu_cap"] + df["Hoa_hồng"] - df["Tam_ung"] - df["Khau_tru"]).round(0)
     df.insert(0, "Tháng", thang)
 
-    st.dataframe(df, use_container_width=True)
+    # Hiển thị đẹp
+    for col in ["Luong_co_ban_tinh","Phu_cap","Hoa_hồng","Tam_ung","Khau_tru","Tổng lương"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-    if st.button("Ghi vào LUONG (ghi đè toàn sheet)", key="pay_write"):
-        try:
-            write_df("LUONG", df)
-            st.success("Đã cập nhật LUONG!")
-        except Exception as e:
-            st.error(f"Lỗi ghi LUONG: {e}")
+    st.dataframe(df[["Tháng","Nhân viên","Công","Luong_co_ban_tinh","Phu_cap","Hoa_hồng","Tam_ung","Khau_tru","Tổng lương"]], use_container_width=True)
 
-# =======================
-# TAB 4: Danh mục/Thiết lập
-# =======================
-with tab4:
-    st.subheader("Quản lý danh mục & gợi ý nhập liệu")
-    st.caption("Thêm nhanh vào LOOKUPS: Đường, Loại sản phẩm, Loại bình, PP Thanh toán, Người chở, Mặt hàng.")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        kind = st.selectbox("Loại danh mục", ["Đường","Loại sản phẩm","Loại bình","PP Thanh toán","Người chở","Mặt hàng"], key="lk_kind")
-        value = st.text_input("Giá trị thêm", key="lk_value")
-        if st.button("Thêm vào LOOKUPS", key="lk_add"):
-            if value.strip():
-                add_lookup(kind, value.strip())
-                st.success("Đã thêm!")
-
-    with col2:
-        try:
-            lk = read_df("LOOKUPS")
-            if not lk.empty:
-                st.dataframe(lk.sort_values(by=["Loại","Giá trị"]), use_container_width=True, height=400)
-            else:
-                st.info("LOOKUPS chưa có dữ liệu.")
-        except Exception as e:
-            st.warning(f"Không đọc được LOOKUPS: {e}")
+    if st.button("Ghi vào LUONG (ghi đè tháng)", key="luong_write"):
+        old = read_df("LUONG")
+        old = old if not old.empty else pd.DataFrame(columns=["Tháng","Nhân viên","Công","Lương cơ bản","Phụ cấp","Hoa hồng","Tạm ứng","Khấu trừ","Tổng lương"])
+        # Chuẩn cột theo file đích
+        out = df.copy()
+        out.rename(columns={
+            "Luong_co_ban_tinh":"Lương cơ bản",
+            "Phu_cap":"Phụ cấp",
+            "Hoa_hồng":"Hoa hồng",
+            "Tam_ung":"Tạm ứng",
+            "Khau_tru":"Khấu trừ"
+        }, inplace=True)
+        base = old[old.get("Tháng","") != thang].copy()
+        base = pd.concat([base, out[["Tháng","Nhân viên","Công","Lương cơ bản","Phụ cấp","Hoa hồng","Tạm ứng","Khấu trừ","Tổng lương"]]], ignore_index=True)
+        write_df("LUONG", base)
+        st.success("Đã cập nhật LUONG cho tháng " + thang)
